@@ -2,7 +2,7 @@ import { tulis } from "../../lib/listdb.js";
 
 export default {
   name: "updatelist",
-  aliases: [],
+  aliases: [group],
   description: "Tambah atau perbarui list (khusus admin grup)",
   usage: "<nama_list>@<isi>",
   example: "updatelist hai@Halo semuanya!",
