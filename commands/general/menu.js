@@ -40,7 +40,7 @@ export default {
     for (const kat of urutan) {
       teks.push("", `╭─「 ${KATEGORI[kat] ?? kat.toUpperCase()} 」`);
       for (const cmd of kelompok.get(kat)) {
-        teks.push(`│ • ${prefix}${cmd.name} — ${cmd.description ?? ""}`);
+        teks.push(`│ ⤷ ${prefix}${cmd.name} — ${cmd.description ?? ""}`);
       }
       teks.push("╰────────────");
     }

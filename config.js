@@ -5,7 +5,7 @@ export const config = {
   // Nomor WhatsApp yang dipakai login bot sekaligus jadi owner.
   // Isi dengan kode negara + nomor, TANPA "+", spasi, atau "-".
   // Contoh Indonesia: "6281234567890" (bukan "081234567890")
-  ownerNumber: "6285388665502",
+  ownerNumber: "6282152035593",
 
   prefix: ".",
   timezone: "Asia/Jakarta",

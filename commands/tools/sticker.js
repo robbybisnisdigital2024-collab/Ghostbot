@@ -1,4 +1,4 @@
-import { exec } from "node:child_process";
+import { execFile } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
@@ -6,10 +6,19 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { downloadMediaMessage } from "@whiskeysockets/baileys";
 
-const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
 
 const UKURAN = 512; // stiker WhatsApp selalu 512x512
 const BATAS_BYTE = 100 * 1024; // stiker statis maksimal ~100 KB
+
+// Batas media yang diterima dari pengguna (mencegah bot dibuat berat)
+const MAKS_GAMBAR = 5 * 1024 * 1024; // 5 MB
+const MAKS_VIDEO = 10 * 1024 * 1024; // 10 MB
+const MAKS_DETIK_VIDEO = 20;
+const MAKS_PIXEL = 40_000_000; // ~6300 x 6300
+
+/** fileLength dari WhatsApp bisa berupa angka, string, atau objek Long. */
+const keAngka = n => Number(n?.toNumber?.() ?? n ?? 0);
 
 /**
  * Tanam nama pack & author ke dalam file WebP (chunk EXIF), supaya
@@ -71,7 +80,7 @@ export async function buatStiker(gambar, { pack, author, fit = "contain" }) {
   // Turunkan kualitas bertahap sampai ukuran file muat
   let webp;
   for (const quality of [80, 60, 40, 20]) {
-    webp = await sharp(gambar)
+    webp = await sharp(gambar, { limitInputPixels: MAKS_PIXEL })
       .resize(UKURAN, UKURAN, { fit, background: { r: 0, g: 0, b: 0, alpha: 0 } })
       .webp({ quality })
       .toBuffer();
@@ -86,19 +95,28 @@ export async function buatStiker(gambar, { pack, author, fit = "contain" }) {
  * Catatan: stiker video tidak dikasih EXIF pack/author (beda dari stiker gambar).
  */
 async function buatStikerVideo(buffer) {
-  const id = Date.now();
+  const id = crypto.randomUUID();
   const inPath = path.join(os.tmpdir(), `sticker_in_${id}.mp4`);
   const outPath = path.join(os.tmpdir(), `sticker_out_${id}.webp`);
   fs.writeFileSync(inPath, buffer);
 
-  const cmd =
-    `ffmpeg -i "${inPath}" -vcodec libwebp ` +
-    `-filter:v "fps=fps=10,scale=512:512:flags=lanczos:force_original_aspect_ratio=decrease,` +
-    `pad=512:512:-1:-1:color=0x00000000" ` +
-    `-lossless 0 -q:v 50 -loop 0 -an -t 00:00:06 -y "${outPath}"`;
+  const filter =
+    "fps=fps=10,scale=512:512:flags=lanczos:force_original_aspect_ratio=decrease," +
+    "pad=512:512:-1:-1:color=0x00000000";
+
+  // execFile = tanpa shell, jadi tidak ada celah injeksi perintah. Timeout menghentikan ffmpeg yang menggantung.
+  const args = [
+    "-nostdin", "-loglevel", "error",
+    "-i", inPath,
+    "-vcodec", "libwebp",
+    "-filter:v", filter,
+    "-lossless", "0", "-q:v", "50", "-loop", "0", "-an",
+    "-t", "00:00:06",
+    "-y", outPath
+  ];
 
   try {
-    await execAsync(cmd);
+    await execFileAsync("ffmpeg", args, { timeout: 30_000, maxBuffer: 10 * 1024 * 1024 });
     if (!fs.existsSync(outPath)) throw new Error("File stiker video tidak terbentuk.");
     return fs.readFileSync(outPath);
   } finally {
@@ -114,19 +132,28 @@ export default {
   description: "Ubah gambar/video menjadi stiker",
   usage: "[crop]",
   example: "sticker crop",
+  cooldown: 10, // detik per pengguna
 
   async run(ctx) {
     // Gambar/video bisa dikirim dengan caption .sticker, atau di-reply dengan .sticker
     let target = null;
-    const video = Boolean(ctx.content?.videoMessage || ctx.quoted?.message?.videoMessage);
+    let info = null; // isi imageMessage / videoMessage yang dipakai
+    let video = false;
 
-    if (ctx.content?.imageMessage || ctx.content?.videoMessage) {
+    const langsung = ctx.content?.imageMessage || ctx.content?.videoMessage;
+    const kutipan = ctx.quoted?.message?.imageMessage || ctx.quoted?.message?.videoMessage;
+
+    if (langsung) {
       target = ctx.msg;
-    } else if (ctx.quoted?.message?.imageMessage || ctx.quoted?.message?.videoMessage) {
+      info = langsung;
+      video = Boolean(ctx.content.videoMessage);
+    } else if (kutipan) {
       target = {
         key: { remoteJid: ctx.jid, id: ctx.quoted.id, participant: ctx.quoted.sender },
         message: ctx.quoted.message
       };
+      info = kutipan;
+      video = Boolean(ctx.quoted.message.videoMessage);
     }
 
     if (!target) {
@@ -136,12 +163,26 @@ export default {
       );
     }
 
+    // Cek ukuran SEBELUM diunduh (data ini dari pengirim, jadi dicek lagi setelah diunduh)
+    const batas = video ? MAKS_VIDEO : MAKS_GAMBAR;
+    const batasMB = batas / 1024 / 1024;
+    if (keAngka(info.fileLength) > batas) {
+      return ctx.reply(`❌ File terlalu besar (maksimal ${batasMB} MB).`);
+    }
+    if (video && Number(info.seconds) > MAKS_DETIK_VIDEO) {
+      return ctx.reply(`❌ Video terlalu panjang (maksimal ${MAKS_DETIK_VIDEO} detik).`);
+    }
+
     const media = await downloadMediaMessage(
       target,
       "buffer",
       {},
       { logger: ctx.sock.logger, reuploadRequest: ctx.sock.updateMediaMessage }
     );
+
+    if (media.length > batas) {
+      return ctx.reply(`❌ File terlalu besar (maksimal ${batasMB} MB).`);
+    }
 
     let stiker;
     if (video) {

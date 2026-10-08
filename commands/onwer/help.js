@@ -25,6 +25,8 @@ export default {
     const syarat = [
       cmd.ownerOnly && "khusus owner",
       cmd.adminOnly && "khusus admin grup",
+      cmd.adminInGroup && "di grup khusus admin",
+      cmd.cooldown && `jeda ${cmd.cooldown} detik`,
       cmd.groupOnly && "hanya di grup"
     ].filter(Boolean);
 

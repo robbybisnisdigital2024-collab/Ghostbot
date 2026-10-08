@@ -3,6 +3,7 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { config } from "../config.js";
 import { db } from "../lib/database.js";
+import { ambil } from "../lib/listdb.js";
 import { logger } from "../lib/logger.js";
 import {
   OWNER_NUMBER,
@@ -21,6 +22,27 @@ const MAX_UMUR_PESAN = 60; // detik. Pesan yang lebih lama (mis. saat bot offlin
 
 const registry = new Map(); // nama / alias -> command
 let daftar = []; // daftar command unik
+
+// ───────────────────────── Cooldown ─────────────────────────
+
+const cooldowns = new Map(); // "pengirim:perintah" -> waktu (ms) kapan boleh dipakai lagi
+
+/** Mengembalikan sisa detik yang harus ditunggu (0 = boleh jalan, dan cooldown langsung dimulai). */
+function cekCooldown(pengirim, perintah, detik) {
+  const kunci = `${pengirim}:${perintah}`;
+  const sekarang = Date.now();
+  const bolehLagi = cooldowns.get(kunci) ?? 0;
+
+  if (sekarang < bolehLagi) return Math.ceil((bolehLagi - sekarang) / 1000);
+
+  cooldowns.set(kunci, sekarang + detik * 1000);
+
+  // Bersihkan entri kedaluwarsa supaya Map tidak membesar terus
+  if (cooldowns.size > 1000) {
+    for (const [k, waktu] of cooldowns) if (waktu < sekarang) cooldowns.delete(k);
+  }
+  return 0;
+}
 
 // ───────────────────────── Memuat command ─────────────────────────
 
@@ -87,7 +109,16 @@ export async function handleMessage(sock, msg) {
   const commandName = bagian[1].toLowerCase();
   const text = bagian[2].trim(); // teks setelah nama perintah (baris baru tetap utuh)
   const command = registry.get(commandName);
-  if (!command) return;
+
+  // Bila bukan command resmi, coba panggil list tersimpan.
+  // Contoh: .hai akan mengirim isi list dengan key "hai".
+  if (!command) {
+    const isiList = ambil(jid, commandName);
+    if (isiList !== null) {
+      await sock.sendMessage(jid, { text: isiList }, { quoted: msg });
+    }
+    return;
+  }
 
   // 2. Siapa pengirimnya?
   const isGroup = jid.endsWith("@g.us");
@@ -137,9 +168,19 @@ export async function handleMessage(sock, msg) {
     if ((command.groupOnly || command.adminOnly) && !isGroup) {
       return await ctx.reply("⛔ Perintah ini hanya bisa dipakai di dalam grup.");
     }
-    if (command.adminOnly && !isOwner) {
+    // adminOnly = wajib di grup & admin. adminInGroup = di grup khusus admin, di chat privat bebas.
+    const butuhAdmin = command.adminOnly || (command.adminInGroup && isGroup);
+    if (butuhAdmin && !isOwner) {
       const { isAdmin } = await ctx.getGroup();
       if (!isAdmin) return await ctx.reply("⛔ Perintah ini khusus admin grup.");
+    }
+
+    // cooldown: jeda antar pemakaian per pengguna (owner dibebaskan)
+    if (command.cooldown && !isOwner) {
+      const sisa = cekCooldown(senderNumber || sender || "?", command.name, command.cooldown);
+      if (sisa > 0) {
+        return await ctx.reply(`⏳ Tunggu ${sisa} detik lagi sebelum pakai *${ctx.prefix}${command.name}*.`);
+      }
     }
 
     await command.run(ctx);
